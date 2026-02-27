@@ -1,6 +1,7 @@
 // In-memory storage (resets on restart - fine for hackathon!)
 const conversationContext = new Map(); // channelId -> Array<messages>
 const taskHashes = new Set(); // For deduplication
+const knownContext = new Map(); // channelId -> { projectName, teamMembers, sprintGoal, etc. }
 
 function addToContext(channelId, content, username) {
   if (!conversationContext.has(channelId)) {
@@ -26,6 +27,26 @@ function getContext(channelId) {
   return messages.map(m => `${m.username}: ${m.content}`);
 }
 
+function getKnownContext(channelId) {
+  return knownContext.get(channelId) || {
+    projectName: null,
+    teamMembers: [],
+    sprintGoal: null,
+    projectDescription: null
+  };
+}
+
+function updateKnownContext(channelId, updates) {
+  const current = getKnownContext(channelId);
+  knownContext.set(channelId, { ...current, ...updates });
+  console.log(`✅ Updated context for channel ${channelId}:`, updates);
+}
+
+function hasMinimumContext(channelId) {
+  const ctx = getKnownContext(channelId);
+  return ctx.projectName && ctx.teamMembers.length > 0;
+}
+
 function isDuplicate(taskTitle) {
   // Normalize title for comparison
   const hash = taskTitle
@@ -46,19 +67,24 @@ function isDuplicate(taskTitle) {
 // Clear context for a channel (optional utility)
 function clearContext(channelId) {
   conversationContext.delete(channelId);
+  knownContext.delete(channelId);
 }
 
 // Get stats (useful for debugging)
 function getStats() {
   return {
     channels: conversationContext.size,
-    tasksTracked: taskHashes.size
+    tasksTracked: taskHashes.size,
+    contextChannels: knownContext.size
   };
 }
 
 module.exports = { 
   addToContext, 
   getContext, 
+  getKnownContext,
+  updateKnownContext,
+  hasMinimumContext,
   isDuplicate, 
   clearContext,
   getStats 
