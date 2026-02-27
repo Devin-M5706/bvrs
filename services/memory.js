@@ -2,6 +2,7 @@
 const conversationContext = new Map(); // channelId -> Array<messages>
 const taskHashes = new Set(); // For deduplication
 const knownContext = new Map(); // channelId -> { projectName, teamMembers, sprintGoal, etc. }
+const onboardingComplete = new Map(); // channelId -> boolean
 
 function addToContext(channelId, content, username) {
   if (!conversationContext.has(channelId)) {
@@ -15,8 +16,8 @@ function addToContext(channelId, content, username) {
     timestamp: Date.now()
   });
   
-  // Keep only last 10 messages per channel
-  if (messages.length > 10) {
+  // Keep only last 20 messages per channel
+  if (messages.length > 20) {
     messages.shift();
   }
 }
@@ -32,7 +33,9 @@ function getKnownContext(channelId) {
     projectName: null,
     teamMembers: [],
     sprintGoal: null,
-    projectDescription: null
+    projectDescription: null,
+    githubOwner: null,
+    githubRepo: null
   };
 }
 
@@ -42,9 +45,20 @@ function updateKnownContext(channelId, updates) {
   console.log(`✅ Updated context for channel ${channelId}:`, updates);
 }
 
+function isOnboarded(channelId) {
+  return onboardingComplete.get(channelId) || false;
+}
+
+function setOnboarded(channelId, status = true) {
+  onboardingComplete.set(channelId, status);
+}
+
 function hasMinimumContext(channelId) {
   const ctx = getKnownContext(channelId);
-  return ctx.projectName && ctx.teamMembers.length > 0;
+  const config = require('../config/users.json');
+  return ctx.projectName && 
+         ctx.teamMembers.length > 0 && 
+         config.projectConfig.projectNumber !== null;
 }
 
 function isDuplicate(taskTitle) {
@@ -68,6 +82,7 @@ function isDuplicate(taskTitle) {
 function clearContext(channelId) {
   conversationContext.delete(channelId);
   knownContext.delete(channelId);
+  onboardingComplete.delete(channelId);
 }
 
 // Get stats (useful for debugging)
@@ -75,7 +90,8 @@ function getStats() {
   return {
     channels: conversationContext.size,
     tasksTracked: taskHashes.size,
-    contextChannels: knownContext.size
+    contextChannels: knownContext.size,
+    onboardedChannels: onboardingComplete.size
   };
 }
 
@@ -85,6 +101,8 @@ module.exports = {
   getKnownContext,
   updateKnownContext,
   hasMinimumContext,
+  isOnboarded,
+  setOnboarded,
   isDuplicate, 
   clearContext,
   getStats 

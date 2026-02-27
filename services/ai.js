@@ -1,5 +1,5 @@
 const OpenAI = require('openai');
-const { getContext, getKnownContext, updateKnownContext } = require('./memory');
+const { getContext, getKnownContext, updateKnownContext, isOnboarded, setOnboarded, hasMinimumContext } = require('./memory');
 const fs = require('fs');
 const path = require('path');
 
@@ -15,18 +15,224 @@ const openai = new OpenAI({
 // - mistralai/Mixtral-8x7B-Instruct-v0.1
 const MODEL = process.env.MODEL || 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
 
-async function checkContextNeeds(message, channelId) {
-  const context = getContext(channelId);
+// Track what question we asked last (for contextual follow-up)
+const lastQuestion = new Map(); // channelId -> { type, askedAt }
+
+function loadConfig() {
+  const configPath = path.join(__dirname, '../config/users.json');
+  return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+}
+
+function saveConfig(config) {
+  const configPath = path.join(__dirname, '../config/users.json');
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  console.log('✅ Updated users.json');
+}
+
+async function runOnboarding(message, channelId) {
   const knownCtx = getKnownContext(channelId);
+  const config = loadConfig();
+  
+  // Determine what we need to ask
+  const missing = [];
+  if (!knownCtx.projectName) missing.push('projectName');
+  if (knownCtx.teamMembers.length === 0) missing.push('teamMembers');
+  if (config.projectConfig.projectNumber === null) missing.push('projectNumber');
+  
+  // If nothing missing, we're done
+  if (missing.length === 0) {
+    if (!isOnboarded(channelId)) {
+      setOnboarded(channelId, true);
+      return { 
+        complete: true, 
+        reply: generateReadyMessage(knownCtx, config)
+      };
+    }
+    return { complete: true, reply: null };
+  }
+  
+  // Get current question type
+  const currentQuestion = lastQuestion.get(channelId);
+  
+  // If we asked a question, try to extract the answer
+  if (currentQuestion) {
+    const extraction = await extractOnboardingAnswer(message, channelId, currentQuestion.type);
+    if (extraction.extracted) {
+      // Reload context after extraction
+      const updatedCtx = getKnownContext(channelId);
+      const updatedConfig = loadConfig();
+      
+      // Check what's still missing
+      const stillMissing = [];
+      if (!updatedCtx.projectName) stillMissing.push('projectName');
+      if (updatedCtx.teamMembers.length === 0) stillMissing.push('teamMembers');
+      if (updatedConfig.projectConfig.projectNumber === null) stillMissing.push('projectNumber');
+      
+      // If all done, show ready message
+      if (stillMissing.length === 0) {
+        lastQuestion.delete(channelId);
+        setOnboarded(channelId, true);
+        return { 
+          complete: true, 
+          reply: `${extraction.confirmation}\n\n${generateReadyMessage(updatedCtx, updatedConfig)}` 
+        };
+      }
+      
+      // Ask next question
+      const nextQuestionType = stillMissing[0];
+      const question = generateQuestion(nextQuestionType, updatedCtx);
+      lastQuestion.set(channelId, { type: nextQuestionType, askedAt: Date.now() });
+      
+      return { 
+        complete: false, 
+        reply: `${extraction.confirmation}\n\n${question}` 
+      };
+    }
+  }
+  
+  // Ask the first missing question
+  const questionType = missing[0];
+  const question = generateQuestion(questionType, knownCtx);
+  lastQuestion.set(channelId, { type: questionType, askedAt: Date.now() });
+  
+  return { complete: false, reply: question };
+}
+
+function generateQuestion(type, knownCtx) {
+  switch (type) {
+    case 'projectName':
+      return `🤔 **Hey! I'm ready to track your tasks. Let's get set up:**\n\nWhat project are you working on?\n_(e.g., "ShopApp, an e-commerce platform")_`;
+    
+    case 'teamMembers':
+      return `🤔 **Who's on the team?**\n\nList your team members with their GitHub usernames:\n_\`@discord (github-username)\`_\n\nExample: \`@alex (alex-smith), @sarah (sarah-dev)\``;
+    
+    case 'projectNumber':
+      return `🤔 **What's your GitHub Project number?**\n\nFind it in your project URL:\n\`github.com/owner/repo/projects/N\`\n\nJust tell me the number (e.g., "3" or "project 5")`;
+    
+    default:
+      return `🤔 Tell me more about your project...`;
+  }
+}
+
+async function extractOnboardingAnswer(message, channelId, questionType) {
+  const knownCtx = getKnownContext(channelId);
+  const config = loadConfig();
   
   const response = await openai.chat.completions.create({
     model: MODEL,
     messages: [
       {
         role: 'system',
-        content: `You are a helpful project assistant. Analyze the conversation and determine what context you need to better understand tasks and assignments.
+        content: `You extract information from a user's response to an onboarding question.
 
-Known context so far:
+Question asked: "${questionType}"
+Expected answer type: ${
+  questionType === 'projectName' ? 'Project name and optional description' :
+  questionType === 'teamMembers' ? 'List of team members with GitHub usernames' :
+  questionType === 'projectNumber' ? 'A number (GitHub Project number)' :
+  'Any relevant info'
+}
+
+Current context:
+- Project: ${knownCtx.projectName || 'Unknown'}
+- Team: ${knownCtx.teamMembers.length > 0 ? knownCtx.teamMembers.join(', ') : 'Unknown'}
+- GitHub Project #: ${config.projectConfig.projectNumber || 'Unknown'}
+
+Extract the answer and return JSON:
+{
+  "extracted": boolean,
+  "data": {
+    "projectName": "string or null",
+    "projectDescription": "string or null", 
+    "teamMembers": [{"discord": "string", "github": "string"}] or null,
+    "projectNumber": number or null
+  },
+  "confirmation": "string (friendly confirmation message)"
+}
+
+Rules:
+- For projectNumber: Extract just the number, even from phrases like "project 3" or "it's number 5"
+- For teamMembers: Parse formats like "@alex (alex-gh)" or "alex is alex-gh"
+- Be flexible with user input
+- Generate a friendly confirmation like "✅ Got it! Project: ShopApp"`
+      },
+      { role: 'user', content: message }
+    ],
+    response_format: { type: 'json_object' }
+  });
+  
+  const result = JSON.parse(response.choices[0].message.content);
+  console.log('Onboarding extraction:', result);
+  
+  // Apply extracted data
+  if (result.extracted && result.data) {
+    const contextUpdates = {};
+    let configUpdated = false;
+    
+    if (result.data.projectName) {
+      contextUpdates.projectName = result.data.projectName;
+    }
+    if (result.data.projectDescription) {
+      contextUpdates.projectDescription = result.data.projectDescription;
+    }
+    
+    // Save team members to users.json and context
+    if (result.data.teamMembers && result.data.teamMembers.length > 0) {
+      for (const member of result.data.teamMembers) {
+        const normalized = member.discord.toLowerCase().replace(/[@]/g, '');
+        config.discordToGithub[normalized] = member.github;
+      }
+      contextUpdates.teamMembers = result.data.teamMembers.map(m => m.discord);
+      configUpdated = true;
+    }
+    
+    // Save project number to config
+    if (result.data.projectNumber !== null && result.data.projectNumber !== undefined) {
+      config.projectConfig.projectNumber = result.data.projectNumber;
+      configUpdated = true;
+    }
+    
+    // Apply context updates
+    if (Object.keys(contextUpdates).length > 0) {
+      updateKnownContext(channelId, contextUpdates);
+    }
+    
+    // Save config if changed
+    if (configUpdated) {
+      saveConfig(config);
+    }
+  }
+  
+  return result;
+}
+
+function generateReadyMessage(knownCtx, config) {
+  const teamList = knownCtx.teamMembers.length > 0 
+    ? knownCtx.teamMembers.join(', ') 
+    : 'No team members set';
+  
+  let msg = `✅ **All set! 🚀**\n\n`;
+  msg += `📋 **Project:** ${knownCtx.projectName || 'Unknown'}\n`;
+  msg += `👥 **Team:** ${teamList}\n`;
+  msg += `📊 **GitHub Project:** #${config.projectConfig.projectNumber}\n\n`;
+  msg += `_Just chat and I'll create tasks automatically!_`;
+  
+  return msg;
+}
+
+async function checkContextNeeds(message, channelId) {
+  const context = getContext(channelId);
+  const knownCtx = getKnownContext(channelId);
+  const config = loadConfig();
+  
+  const response = await openai.chat.completions.create({
+    model: MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: `You are a helpful project assistant. Analyze the conversation and determine if context needs updating.
+
+Known context:
 - Project Name: ${knownCtx.projectName || 'Unknown'}
 - Team Members: ${knownCtx.teamMembers.length > 0 ? knownCtx.teamMembers.join(', ') : 'Unknown'}
 - Sprint/Goal: ${knownCtx.sprintGoal || 'Unknown'}
@@ -35,19 +241,11 @@ Recent conversation:
 ${context.join('\n')}
 
 Your job:
-1. Check if this message provides project context (name, team, goals)
-2. If context is missing AND we need it to process tasks, generate a friendly question
-3. Extract any context updates from the message
-
-Context needed when:
-- No project name known and task references "the project"
-- No team members known and someone is assigned a task
-- Task references sprint/feature we don't know about
+1. Check if this message provides context updates (new team member, project name change, etc.)
+2. Extract any context updates
 
 Return JSON only:
 {
-  "needsMoreContext": boolean,
-  "question": "string or null (friendly question to ask the team)",
   "contextUpdates": {
     "projectName": "string or null",
     "teamMembers": ["array of usernames or null"],
@@ -183,8 +381,7 @@ Return JSON only:
 async function updateUserMappings(newMappings) {
   if (!newMappings || Object.keys(newMappings).length === 0) return false;
   
-  const configPath = path.join(__dirname, '../config/users.json');
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const config = loadConfig();
   
   let updated = false;
   for (const [discord, github] of Object.entries(newMappings)) {
@@ -198,14 +395,14 @@ async function updateUserMappings(newMappings) {
   }
   
   if (updated) {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-    console.log('✅ Updated users.json with new mappings');
+    saveConfig(config);
   }
   
   return updated;
 }
 
 module.exports = { 
+  runOnboarding,
   checkContextNeeds,
   extractTask, 
   extractUserMappings, 

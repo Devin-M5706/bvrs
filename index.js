@@ -1,8 +1,8 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
-const { checkContextNeeds, extractTask, extractUserMappings, updateUserMappings } = require('./services/ai');
+const { runOnboarding, checkContextNeeds, extractTask, extractUserMappings, updateUserMappings } = require('./services/ai');
 const { createIssue } = require('./services/github');
-const { addToContext, isDuplicate, hasMinimumContext } = require('./services/memory');
+const { addToContext, isDuplicate, isOnboarded } = require('./services/memory');
 const { getProjectMeta } = require('./services/github-project');
 
 const client = new Client({
@@ -16,13 +16,12 @@ const client = new Client({
 client.on('ready', async () => {
   console.log(`✅ Bot logged in as ${client.user.tag}`);
   
-  // Verify GitHub Project connection on startup
+  // Verify GitHub connection (but project may not be configured yet)
   try {
     const meta = await getProjectMeta();
     console.log(`✅ Connected to GitHub Project: ${meta.projectId}`);
   } catch (error) {
-    console.error('⚠️  GitHub Project connection failed:', error.message);
-    console.log('   Issues will still be created, but project board may not update');
+    console.log(`ℹ️  GitHub Project not yet configured - will prompt during onboarding`);
   }
 });
 
@@ -34,7 +33,22 @@ client.on('messageCreate', async (message) => {
   addToContext(message.channelId, message.content, message.author.username);
   
   try {
-    // First, check for user introductions/mappings
+    // Run onboarding flow if not complete
+    const onboarding = await runOnboarding(message.content, message.channelId);
+    if (!onboarding.complete) {
+      if (onboarding.reply) {
+        await message.reply(onboarding.reply);
+      }
+      return;
+    }
+    
+    // Show ready message on first completion
+    if (onboarding.reply) {
+      await message.reply(onboarding.reply);
+      return;
+    }
+    
+    // Check for new user mappings
     const userResult = await extractUserMappings(message.content, message.channelId);
     if (userResult.hasMappings) {
       const updated = await updateUserMappings(userResult.mappings);
@@ -46,12 +60,8 @@ client.on('messageCreate', async (message) => {
       }
     }
     
-    // Check if we need more context (and ask if needed)
-    const contextCheck = await checkContextNeeds(message.content, message.channelId);
-    if (contextCheck.needsMoreContext && contextCheck.question) {
-      await message.reply(`🤔 ${contextCheck.question}`);
-      return; // Don't process task until we have context
-    }
+    // Update context from conversation
+    await checkContextNeeds(message.content, message.channelId);
     
     // Extract task using AI
     const task = await extractTask(message.content, message.channelId);
