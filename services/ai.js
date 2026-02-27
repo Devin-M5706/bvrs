@@ -287,7 +287,7 @@ async function extractTask(message, channelId) {
     messages: [
       {
         role: 'system',
-        content: `You analyze Discord messages and extract actionable tasks.
+        content: `You analyze Discord messages and extract actionable tasks with rich context.
 
 Project context:
 - Name: ${knownCtx.projectName || 'Unknown project'}
@@ -299,26 +299,48 @@ ${context.join('\n')}
 
 Your job:
 1. Determine if the message contains an actionable task, bug report, or action item
-2. If yes, extract structured data
-3. If no, return isActionable: false
+2. Extract structured data with rich context
+3. Capture IMPLICIT SIGNALS that would normally be lost in manual task creation
+4. Assess your confidence level
 
-Rules:
-- Only mark as actionable if there's a clear task, bug, or action item
-- Extract assignee if someone is mentioned (e.g., "@sarah", "sarah can you...")
-- Infer priority from urgency words:
-  - "urgent", "asap", "critical", "blocking" = high
-  - "soon", "this week", "by friday" = medium  
-  - Everything else = low
-- Create a concise, clear task title
-- Include original message context in description
+PRIORITY INFERENCE:
+- "urgent", "asap", "critical", "blocking", "right now" = high
+- "soon", "this week", "by friday", "tomorrow" = medium  
+- Everything else = low
+
+IMPLICIT SIGNALS TO CAPTURE (these are often lost when manually creating tasks):
+- blockers: Any blockers or dependencies mentioned ("need X first", "waiting on Y", "blocked by")
+- urgencyReason: WHY is this urgent? ("customer complained", "production down", "revenue impact")
+- relatedWork: Other tasks/features mentioned in relation to this
+- mentionedBy: Who originally mentioned or identified this issue
+- businessImpact: Any business/customer impact mentioned
+- timeContext: Any time-related context ("been broken for 2 days", "started yesterday")
+
+CONFIDENCE ASSESSMENT:
+- high: Clear, unambiguous task with most details extractable
+- medium: Likely a task but some ambiguity or missing critical details
+- low: Unclear if this is actually a task, or critical details are missing
+
+CLARITY QUESTIONS:
+When confidence is NOT high, provide specific questions to clarify what's needed.
 
 Return JSON only, no markdown:
 {
   "isActionable": boolean,
-  "title": "string (concise task title)",
+  "confidence": "high" | "medium" | "low",
+  "title": "string (concise task title, null if low confidence)",
   "assignee": "string or null (username without @)",
   "priority": "low" | "medium" | "high",
-  "description": "string (original message context)"
+  "description": "string (original message context)",
+  "implicitSignals": {
+    "blockers": ["string"] or null,
+    "urgencyReason": "string or null",
+    "relatedWork": ["string"] or null,
+    "mentionedBy": "string or null",
+    "businessImpact": "string or null",
+    "timeContext": "string or null"
+  },
+  "clarityQuestions": ["string"] or null
 }`
       },
       { role: 'user', content: message }

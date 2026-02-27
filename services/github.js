@@ -46,8 +46,38 @@ async function createIssue(task) {
 
   const githubAssignee = mapAssignee(task.assignee);
 
+  // Build implicit signals section if available
+  let implicitSignalsSection = '';
+  if (task.implicitSignals) {
+    const signals = task.implicitSignals;
+    const signalParts = [];
+    
+    if (signals.blockers && signals.blockers.length > 0) {
+      signalParts.push(`**Blockers:** ${signals.blockers.join(', ')}`);
+    }
+    if (signals.urgencyReason) {
+      signalParts.push(`**Why Urgent:** ${signals.urgencyReason}`);
+    }
+    if (signals.relatedWork && signals.relatedWork.length > 0) {
+      signalParts.push(`**Related Work:** ${signals.relatedWork.join(', ')}`);
+    }
+    if (signals.mentionedBy) {
+      signalParts.push(`**Identified by:** ${signals.mentionedBy}`);
+    }
+    if (signals.businessImpact) {
+      signalParts.push(`**Business Impact:** ${signals.businessImpact}`);
+    }
+    if (signals.timeContext) {
+      signalParts.push(`**Time Context:** ${signals.timeContext}`);
+    }
+    
+    if (signalParts.length > 0) {
+      implicitSignalsSection = `\n\n---\n## 📌 Context Captured from Conversation\n${signalParts.join('\n')}`;
+    }
+  }
+
   const body = `## Description
-${task.description}
+${task.description}${implicitSignalsSection}
 
 ---
 **Priority:** ${task.priority}
