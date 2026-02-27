@@ -10,55 +10,98 @@ let projectCache = null;
 
 /**
  * Get project ID and field IDs from cache or API
+ * Supports both organization and personal/user projects
  */
 async function getProjectMeta() {
   if (projectCache) return projectCache;
 
-  const query = `
-    query($owner: String!, $projectNumber: Int!) {
-      organization(login: $owner) {
-        projectV2(number: $projectNumber) {
-          id
-          fields(first: 20) {
-            nodes {
-              ... on ProjectV2SingleSelectField {
-                id
-                name
-                options {
-                  id
-                  name
+  const config = require('../config/users.json');
+  const owner = process.env.GITHUB_OWNER;
+  const projectNumber = config.projectConfig.projectNumber;
+
+  if (!projectNumber) {
+    throw new Error('Project number not configured. Complete onboarding first.');
+  }
+
+  // Try organization first, then user
+  const queries = [
+    {
+      type: 'organization',
+      query: `
+        query($owner: String!, $projectNumber: Int!) {
+          organization(login: $owner) {
+            projectV2(number: $projectNumber) {
+              id
+              fields(first: 20) {
+                nodes {
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    name
+                    options { id name }
+                  }
                 }
               }
             }
           }
         }
-      }
+      `
+    },
+    {
+      type: 'user',
+      query: `
+        query($owner: String!, $projectNumber: Int!) {
+          user(login: $owner) {
+            projectV2(number: $projectNumber) {
+              id
+              fields(first: 20) {
+                nodes {
+                  ... on ProjectV2SingleSelectField {
+                    id
+                    name
+                    options { id name }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `
     }
-  `;
+  ];
 
-  const config = require('../config/users.json');
-  const result = await graphqlWithAuth(query, {
-    owner: process.env.GITHUB_OWNER,
-    projectNumber: config.projectConfig.projectNumber
-  });
+  for (const { type, query } of queries) {
+    try {
+      const result = await graphqlWithAuth(query, { owner, projectNumber });
+      
+      const project = result[type]?.projectV2;
+      if (!project) continue;
 
-  const project = result.organization.projectV2;
-  
-  // Extract field IDs
-  const fields = {};
-  for (const field of project.fields.nodes) {
-    fields[field.name] = {
-      id: field.id,
-      options: field.options || []
-    };
+      // Extract field IDs
+      const fields = {};
+      for (const field of project.fields.nodes) {
+        if (field && field.name) {
+          fields[field.name] = {
+            id: field.id,
+            options: field.options || []
+          };
+        }
+      }
+
+      projectCache = {
+        projectId: project.id,
+        fields,
+        ownerType: type
+      };
+
+      console.log(`✅ Found GitHub Project as ${type}`);
+      return projectCache;
+    } catch (error) {
+      // Try next query type
+      continue;
+    }
   }
 
-  projectCache = {
-    projectId: project.id,
-    fields
-  };
-
-  return projectCache;
+  throw new Error(`Project #${projectNumber} not found for owner ${owner} (tried org and user)`);
 }
 
 /**
@@ -83,7 +126,7 @@ function mapAssignee(discordUsername) {
  * Get priority option ID from field
  */
 function getPriorityOptionId(fields, priority) {
-  const priorityField = fields[fields.priorityField || 'Priority'];
+  const priorityField = fields['Priority'];
   if (!priorityField) return null;
   
   const option = priorityField.options.find(
@@ -97,7 +140,7 @@ function getPriorityOptionId(fields, priority) {
  * Get status option ID from field
  */
 function getStatusOptionId(fields, statusName) {
-  const statusField = fields[fields.statusField || 'Status'];
+  const statusField = fields['Status'];
   if (!statusField) return null;
   
   const option = statusField.options.find(
@@ -179,8 +222,16 @@ async function updateProjectField(projectId, itemId, fieldId, value) {
   });
 }
 
+/**
+ * Clear project cache (useful after config changes)
+ */
+function clearProjectCache() {
+  projectCache = null;
+}
+
 module.exports = {
   getProjectMeta,
   mapAssignee,
-  addIssueToProject
+  addIssueToProject,
+  clearProjectCache
 };

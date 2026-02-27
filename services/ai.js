@@ -107,7 +107,7 @@ function generateQuestion(type, knownCtx) {
       return `🤔 **Who's on the team?**\n\nList your team members with their GitHub usernames:\n_\`@discord (github-username)\`_\n\nExample: \`@alex (alex-smith), @sarah (sarah-dev)\``;
     
     case 'projectNumber':
-      return `🤔 **What's your GitHub Project number?**\n\nFind it in your project URL:\n\`github.com/owner/repo/projects/N\`\n\nJust tell me the number (e.g., "3" or "project 5")`;
+      return `🤔 **What's your GitHub Project number?**\n\nFind it in your project URL:\n• Organization: \`github.com/orgs/ORG/projects/N\`\n• Personal: \`github.com/users/YOU/projects/N\`\n\nJust tell me the number (e.g., "3" or "project 5")`;
     
     default:
       return `🤔 Tell me more about your project...`;
@@ -331,6 +331,64 @@ Return JSON only, no markdown:
   return result;
 }
 
+async function detectTaskUpdate(message, channelId) {
+  const context = getContext(channelId);
+  const knownCtx = getKnownContext(channelId);
+  
+  const response = await openai.chat.completions.create({
+    model: MODEL,
+    messages: [
+      {
+        role: 'system',
+        content: `You analyze Discord messages to detect task status updates.
+
+Project context:
+- Name: ${knownCtx.projectName || 'Unknown project'}
+- Team: ${knownCtx.teamMembers.length > 0 ? knownCtx.teamMembers.join(', ') : 'Unknown team'}
+
+Recent conversation:
+${context.join('\n')}
+
+Your job:
+1. Detect if the message is updating a task's status
+2. Extract the task reference (can be title, subject, or keywords)
+3. Determine the new status
+
+Common patterns:
+- "login bug is done" / "fixed the login issue" → status: done
+- "I'm working on the checkout flow" / "starting on checkout" → status: in_progress
+- "sarah is taking over the API task" → status: reassigned, assignee: sarah
+- "the payment bug is blocked" → status: blocked
+- "make the search issue urgent" → priority: high
+- "we don't need the logo task anymore" → status: cancelled
+
+Return JSON only:
+{
+  "isUpdate": boolean,
+  "taskReference": "string or null (keywords to find the task, e.g., 'login bug', 'checkout flow')",
+  "updateType": "status" | "priority" | "assignee" | null,
+  "newStatus": "done" | "in_progress" | "blocked" | "cancelled" | null,
+  "newPriority": "low" | "medium" | "high" | null,
+  "newAssignee": "string or null (username without @)",
+  "confidence": "high" | "medium" | "low"
+}
+
+Rules:
+- Only mark isUpdate: true if clearly updating an existing task
+- Extract meaningful keywords for taskReference (not full sentence)
+- Be generous with matching - "that bug" or "the issue" references recent task context
+- High confidence = clear intent, Low confidence = ambiguous`
+      },
+      { role: 'user', content: message }
+    ],
+    response_format: { type: 'json_object' }
+  });
+  
+  const result = JSON.parse(response.choices[0].message.content);
+  console.log('AI detected task update:', result);
+  return result;
+}
+
 async function extractUserMappings(message, channelId) {
   const context = getContext(channelId);
   
@@ -406,5 +464,6 @@ module.exports = {
   checkContextNeeds,
   extractTask, 
   extractUserMappings, 
-  updateUserMappings 
+  updateUserMappings,
+  detectTaskUpdate
 };
