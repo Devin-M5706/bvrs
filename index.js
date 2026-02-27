@@ -1,8 +1,9 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
-const { extractTask } = require('./services/ai');
+const { extractTask, extractUserMappings, updateUserMappings } = require('./services/ai');
 const { createIssue } = require('./services/github');
 const { addToContext, isDuplicate } = require('./services/memory');
+const { getProjectMeta } = require('./services/github-project');
 
 const client = new Client({
   intents: [
@@ -12,8 +13,17 @@ const client = new Client({
   ]
 });
 
-client.on('ready', () => {
+client.on('clientready', async () => {
   console.log(`✅ Bot logged in as ${client.user.tag}`);
+  
+  // Verify GitHub Project connection on startup
+  try {
+    const meta = await getProjectMeta();
+    console.log(`✅ Connected to GitHub Project: ${meta.projectId}`);
+  } catch (error) {
+    console.error('⚠️  GitHub Project connection failed:', error.message);
+    console.log('   Issues will still be created, but project board may not update');
+  }
 });
 
 client.on('messageCreate', async (message) => {
@@ -24,6 +34,18 @@ client.on('messageCreate', async (message) => {
   addToContext(message.channelId, message.content, message.author.username);
   
   try {
+    // Check for user introductions/mappings first
+    const userResult = await extractUserMappings(message.content, message.channelId);
+    if (userResult.hasMappings) {
+      const updated = await updateUserMappings(userResult.mappings);
+      if (updated) {
+        const mappings = Object.entries(userResult.mappings)
+          .map(([d, g]) => `@${d} → ${g}`)
+          .join('\n');
+        await message.reply(`✅ Added team members:\n${mappings}`);
+      }
+    }
+    
     // Extract task using AI
     const task = await extractTask(message.content, message.channelId);
     
