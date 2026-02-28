@@ -4,6 +4,18 @@ const { runOnboarding, checkContextNeeds, extractTask, extractUserMappings, upda
 const { createIssue, findIssueByTitle, updateIssueStatus, closeIssue, reassignIssue, updateIssuePriority, addIssueComment } = require('./services/github');
 const { addToContext, isDuplicate, isOnboarded } = require('./services/memory');
 const { getProjectMeta, mapAssignee } = require('./services/github-project');
+const {
+  processMessage,
+  getFormattedContext,
+  getTaskContextForAI,
+  linkTaskToOrigin,
+  getActiveThread,
+  recordConfidence,
+  recordOutcome,
+  answerContextQuery,
+  getLearnedConfidenceAdjustment,
+  analyzeTemporalPatterns
+} = require('./services/context');
 
 const client = new Client({
   intents: [
@@ -29,7 +41,7 @@ async function logActivity(channel, action, details) {
   }
 }
 
-client.on('ready', async () => {
+client.on('clientReady', async () => {
   console.log(`✅ Bot logged in as ${client.user.tag}`);
   
   try {
@@ -43,6 +55,20 @@ client.on('ready', async () => {
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
   
+  // Get project name for cross-channel context
+  const { getKnownContext } = require('./services/memory');
+  const knownCtx = getKnownContext(message.channelId);
+  const projectName = knownCtx.projectName;
+  
+  // Process message through enhanced context system
+  const contextResult = processMessage(
+    message.channelId,
+    message.content,
+    message.author.username,
+    projectName
+  );
+  
+  // Also add to basic context (for backwards compatibility)
   addToContext(message.channelId, message.content, message.author.username);
   
   try {
@@ -58,6 +84,13 @@ client.on('messageCreate', async (message) => {
     
     if (onboarding.reply) {
       await message.reply(onboarding.reply);
+      return;
+    }
+    
+    // Check for context queries ("why did we decide X?", "what's stale?", etc.)
+    const contextQuery = answerContextQuery(message.content, message.channelId, projectName);
+    if (contextQuery && isContextQuery(message.content)) {
+      await message.reply(`📌 **Context:**\n${contextQuery}`);
       return;
     }
     
@@ -135,15 +168,30 @@ client.on('messageCreate', async (message) => {
     // Update context from conversation
     await checkContextNeeds(message.content, message.channelId);
     
-    // Extract new tasks using AI
+    // Extract new tasks using AI (with enhanced context)
     const task = await extractTask(message.content, message.channelId);
     
     if (task.isActionable) {
+      // Apply learned confidence adjustment
+      const adjustment = getLearnedConfidenceAdjustment(message.content, task.confidence);
+      
+      // Use adjusted confidence if we have learning data
+      const effectiveConfidence = adjustment.adjustment !== 0 
+        ? adjustment.adjustedConfidence 
+        : task.confidence;
+      
+      // Record this confidence decision for learning
+      const confidenceEntry = recordConfidence(message.content, task, 'pending');
+      
       // Handle low confidence - ask for clarification
-      if (task.confidence === 'low') {
+      if (effectiveConfidence === 'low') {
         await logActivity(message.channel, '🤔 Low Confidence Detection', `Possible task: "${task.title || 'unclear'}"`);
         
         let reply = `🤔 **I think this might be a task, but I need clarification:**\n\n`;
+        
+        if (adjustment.reasons.length > 0) {
+          reply += `**Signals detected:**\n${adjustment.reasons.map(r => `• ${r}`).join('\n')}\n\n`;
+        }
         
         if (task.clarityQuestions && task.clarityQuestions.length > 0) {
           reply += task.clarityQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n');
@@ -152,12 +200,16 @@ client.on('messageCreate', async (message) => {
         }
         
         reply += `\n\n_Reply with more details or say "create it" to proceed anyway._`;
+        
+        // Track that we asked for clarification
+        confidenceEntry.action = 'asked_clarification';
+        
         await message.reply(reply);
         return;
       }
       
       // Handle medium confidence - ask for confirmation
-      if (task.confidence === 'medium') {
+      if (effectiveConfidence === 'medium') {
         await logActivity(message.channel, '🤔 Medium Confidence Detection', `Possible task: "${task.title}"`);
         
         let reply = `📝 **I think this is a task. Is this correct?**\n\n`;
@@ -165,12 +217,19 @@ client.on('messageCreate', async (message) => {
         reply += `Priority: ${task.priority}\n`;
         if (task.assignee) reply += `Assignee: @${task.assignee}\n`;
         
+        if (adjustment.reasons.length > 0) {
+          reply += `\n**Confidence factors:** ${adjustment.reasons.join(', ')}`;
+        }
+        
         if (task.clarityQuestions && task.clarityQuestions.length > 0) {
-          reply += `\n**Questions:**\n`;
+          reply += `\n\n**Questions:**\n`;
           reply += task.clarityQuestions.map((q, i) => `${i + 1}. ${q}`).join('\n');
         }
         
         reply += `\n\n_React with ✅ to create, or provide more details._`;
+        
+        // Track that we asked for confirmation
+        confidenceEntry.action = 'asked_confirmation';
         
         const confirmationMsg = await message.reply(reply);
         await confirmationMsg.react('✅');
@@ -179,10 +238,29 @@ client.on('messageCreate', async (message) => {
       }
       
       // High confidence - create the task
-      if (task.confidence === 'high' && !isDuplicate(task.title)) {
+      if (effectiveConfidence === 'high' && !isDuplicate(task.title)) {
         await logActivity(message.channel, '📋 Creating Task', `"${task.title}" | Priority: ${task.priority} | Assignee: ${task.assignee || 'unassigned'}`);
         
         const issue = await createIssue(task);
+        
+        // Track successful creation
+        confidenceEntry.action = 'created';
+        recordOutcome(confidenceEntry.id, 'accepted');
+        
+        // Link task to its conversation origin
+        const thread = getActiveThread(message.channelId);
+        if (thread) {
+          linkTaskToOrigin(
+            issue.number.toString(),
+            message.channelId,
+            thread.id,
+            thread.messages.slice(-5).map(m => ({
+              content: m.content,
+              username: m.username,
+              timestamp: m.timestamp
+            }))
+          );
+        }
         
         let reply = `✅ Created task: "${task.title}"\n🔗 ${issue.html_url}`;
         
@@ -202,10 +280,34 @@ client.on('messageCreate', async (message) => {
         await logActivity(message.channel, '✅ Task Created', `#${issue.number}: "${task.title}"`);
       }
     }
+    
+    // Periodically check for stale tasks and alert
+    if (Math.random() < 0.05) { // 5% chance per message
+      const patterns = analyzeTemporalPatterns(message.channelId);
+      if (patterns.stalenessAlerts.length > 0 && patterns.stalenessAlerts[0].hoursSinceActivity > 48) {
+        const alert = patterns.stalenessAlerts[0];
+        await message.reply(`⚠️ **Reminder:** Task "${alert.task}" hasn't been updated in ${alert.hoursSinceActivity}h. Last mentioned by ${alert.lastMentionedBy}.`);
+      }
+    }
+    
   } catch (error) {
     console.error('Error processing message:', error);
     await logActivity(message.channel, '❌ Error', error.message);
   }
 });
+
+// Helper to detect context queries
+function isContextQuery(content) {
+  const queryPatterns = [
+    /why\s+(?:did\s+)?we\s+decide/i,
+    /what['']?s\s+(?:the\s+)?context/i,
+    /what\s+are\s+we\s+discussing/i,
+    /what['']?s\s+(?:fallen|stale|forgotten)/i,
+    /what['']?s\s+trending/i,
+    /tell me about\s+(?:issue|task)/i
+  ];
+  
+  return queryPatterns.some(p => p.test(content));
+}
 
 client.login(process.env.DISCORD_TOKEN);

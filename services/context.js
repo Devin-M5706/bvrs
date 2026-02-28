@@ -128,7 +128,14 @@ function addMessageToThread(channelId, messageId, content, username, timestamp =
   
   // Extract and track entities
   const entities = extractEntities(content);
-  entities.forEach(e => thread.entities.add(e));
+  // entities is an object with arrays, not an array itself
+  const allEntities = [
+    ...entities.people,
+    ...entities.tasks,
+    ...entities.features,
+    ...entities.concepts
+  ];
+  allEntities.forEach(e => thread.entities.add(e));
   
   return thread;
 }

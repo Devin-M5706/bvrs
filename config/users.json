@@ -1,7 +1,10 @@
 {
-  "discordToGithub": {},
+  "discordToGithub": {
+    "1240817181692792934": "s9kt",
+    "740665248956153929": "Devin-M5706"
+  },
   "projectConfig": {
-    "projectNumber": null,
+    "projectNumber": 2,
     "statusField": "Status",
     "priorityField": "Priority",
     "defaultStatus": "Todo"
