@@ -14,7 +14,8 @@ const {
   recordOutcome,
   answerContextQuery,
   getLearnedConfidenceAdjustment,
-  analyzeTemporalPatterns
+  analyzeTemporalPatterns,
+  findTaskOriginByKeyword
 } = require('./services/context');
 
 const client = new Client({
@@ -100,8 +101,31 @@ client.on('messageCreate', async (message) => {
     if (taskUpdate.isUpdate && taskUpdate.confidence !== 'low') {
       await logActivity(message.channel, '🔍 Detecting Task Update', `Looking for: "${taskUpdate.taskReference}"`);
       
-      // Find the issue by title/keywords
-      const issue = await findIssueByTitle(taskUpdate.taskReference);
+      // First try to find via context system (tracks recently created tasks)
+      let issue = null;
+      const origin = findTaskOriginByKeyword(taskUpdate.taskReference, message.channelId);
+      
+      if (origin) {
+        // Found in our tracking - fetch by issue number
+        try {
+          const { Octokit } = require('@octokit/rest');
+          const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+          const issueData = await octokit.issues.get({
+            owner: process.env.GITHUB_OWNER,
+            repo: process.env.GITHUB_REPO,
+            issue_number: parseInt(origin.taskId)
+          });
+          issue = issueData.data;
+          console.log(`📍 Found task via context tracking: #${issue.number}`);
+        } catch (e) {
+          console.log('Context tracking found task but GitHub fetch failed:', e.message);
+        }
+      }
+      
+      // Fall back to GitHub search if not found via context
+      if (!issue) {
+        issue = await findIssueByTitle(taskUpdate.taskReference);
+      }
       
       if (issue) {
         let reply = '';
@@ -135,6 +159,8 @@ client.on('messageCreate', async (message) => {
             await reassignIssue(issue.number, githubUser);
             reply += `\n👤 Assigned to ${taskUpdate.newAssignee}`;
             actions.push(`Assignee → ${taskUpdate.newAssignee}`);
+          } else {
+            reply += `\n⚠️ Could not map @${taskUpdate.newAssignee} to GitHub username`;
           }
         }
         

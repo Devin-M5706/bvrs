@@ -115,20 +115,17 @@ ${githubAssignee ? `**GitHub Assignee:** @${githubAssignee}` : ''}
  */
 async function findIssueByTitle(keywords) {
   try {
-    // Build search query
-    const query = `${keywords} repo:${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO} is:issue is:open`;
+    // Try exact match first
+    let query = `${keywords} repo:${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO} is:issue is:open`;
+    let response = await octokit.search.issuesAndPullRequests({ q: query, per_page: 5 });
     
-    const response = await octokit.search.issuesAndPullRequests({
-      q: query,
-      per_page: 5
-    });
-    
+    // If no results, try broader search (in title/body)
     if (response.data.items.length === 0) {
-      return null;
+      query = `${keywords} in:title,body repo:${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO} is:issue is:open`;
+      response = await octokit.search.issuesAndPullRequests({ q: query, per_page: 5 });
     }
     
-    // Return the best match (first result)
-    return response.data.items[0];
+    return response.data.items[0] || null;
   } catch (error) {
     console.error('Error searching issues:', error.message);
     return null;
@@ -216,11 +213,12 @@ async function closeIssue(issueNumber, comment = null) {
  */
 async function reassignIssue(issueNumber, githubUsername) {
   try {
-    await octokit.issues.addAssignees({
+    // Use update() to REPLACE assignees (not add)
+    await octokit.issues.update({
       owner: process.env.GITHUB_OWNER,
       repo: process.env.GITHUB_REPO,
       issue_number: issueNumber,
-      assignees: [githubUsername]
+      assignees: [githubUsername]  // This replaces all assignees
     });
     
     console.log(`✅ Reassigned issue #${issueNumber} to ${githubUsername}`);
