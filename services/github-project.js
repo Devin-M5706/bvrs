@@ -111,10 +111,15 @@ function mapAssignee(discordUsername) {
   if (!discordUsername) return null;
   
   const config = require('../config/users.json');
+  
+  // Normalize for comparison
   const normalized = discordUsername.toLowerCase().replace(/[^a-z0-9]/g, '');
   
   for (const [discord, github] of Object.entries(config.discordToGithub)) {
-    if (discord.toLowerCase().replace(/[^a-z0-9]/g, '') === normalized) {
+    const normalizedKey = discord.toLowerCase().replace(/[^a-z0-9]/g, '');
+    
+    // Match by Discord username OR Discord ID OR already a GitHub username
+    if (normalizedKey === normalized || discord === discordUsername || github === discordUsername) {
       return github;
     }
   }
